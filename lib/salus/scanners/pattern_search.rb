@@ -21,9 +21,9 @@ module Salus::Scanners
     end
 
     def run
-      global_exclude_directory_flags = flag_list('--exclude-dirs', @config['exclude_directory'])
-      global_exclude_extension_flags = extension_flag('--exclude-ext', @config['exclude_extension'])
-      global_include_extension_flags = extension_flag('--ext', @config['include_extension'])
+      global_exclude_directory_flags = flag_list('-g', @config['exclude_directory'])
+      global_exclude_extension_flags = extension_flag('-g', @config['exclude_extension'], false)
+      global_include_extension_flags = extension_flag('-g', @config['include_extension'], true)
 
       # For each pattern, keep a running history of failures, errors, and hits
       # These will be reported on at the end.
@@ -40,11 +40,11 @@ module Salus::Scanners
         #   - if panic:           return 2, STDERR has the error
 
         match_exclude_directory_flags = flag_list(
-          '--exclude-dirs', match['exclude_directory']
+          '-g', match['exclude_directory']
         )
-        match_exclude_extension_flags = extension_flag('--exclude-ext', \
-                                                       match['exclude_extension'])
-        match_include_extension_flags = extension_flag('--ext', match['include_extension'])
+        match_exclude_extension_flags = extension_flag('-g', \
+                                                       match['exclude_extension'], false)
+        match_include_extension_flags = extension_flag('-g', match['include_extension'], true)
 
         # --exclude_filepaths can be specified at the global level and match level
         # if both are specified, they should be joined
@@ -52,27 +52,24 @@ module Salus::Scanners
         exclude_filepath_pattern = filepath_pattern(ex_paths)
 
         command_array = [
-          "sift",
-          "-n",
-          "-e",
-          match['regex'],
-          "--exclude-path",
+          "rg",
+          "\'#{match['regex']}\'",
           exclude_filepath_pattern,
-          "--exclude-files",
-          "salus.yaml",
-          ".",
+          "-g",
+          "\'\!salus.yaml\'",
           *(match_exclude_directory_flags || global_exclude_directory_flags),
           *(match_exclude_extension_flags || global_exclude_extension_flags),
           *(match_include_extension_flags || global_include_extension_flags)
         ].compact
-
+        command_array = command_array.reject { |c| c.empty? }
         not_followed_within = match["not_followed_within"]
         command_array += ['--not-followed-within', not_followed_within] if not_followed_within
         files = match['files']
         files&.each do |file|
-          command_array += ['--files', file]
+          command_array += ['-g', "\'#{file}\'"]
         end
-
+        message = "command array is ", command_array
+        puts message
         shell_return = run_shell(command_array)
         # Set defaults.
         match['forbidden'] ||= false
@@ -119,7 +116,7 @@ module Salus::Scanners
           end
         else
           raise UnhandledExitStatusError,
-                "Unknown exit status #{shell_return.status} from sift "\
+                "Unknown exit status #{shell_return.status} from ripgrep "\
                   "(grep alternative).\n" \
                   "STDOUT: #{shell_return.stdout}\n" \
                   "STDERR: #{shell_return.stderr}"
@@ -128,7 +125,7 @@ module Salus::Scanners
 
       report_info(:hits, all_hits)
       report_info(:misses, all_misses)
-      errors.each { |error| report_error('Call to sift failed', error) }
+      errors.each { |error| report_error('Call to ripgrep failed', error) }
 
       if failure_messages.empty?
         report_success
@@ -143,8 +140,8 @@ module Salus::Scanners
     end
 
     def version
-      shell_return = run_shell('sift --version')
-      # stdout looks like "sift 0.9.0 (linux/amd64)\nCopyright (C) 2014-2016 ..."
+      shell_return = run_shell('rg --version')
+      # stdout looks like "ripgrep 13.0.0 -SIMD -AVX (compiled) +SIMD +AVX (runtime)"
       shell_return.stdout&.split&.dig(1)
     end
 
@@ -154,21 +151,30 @@ module Salus::Scanners
 
     private
 
-    def extension_flag(flag, file_extensions)
+    def extension_flag(flag, file_extensions, include)
       if file_extensions.nil? || flag.nil?
         nil
       elsif file_extensions.empty? || flag.empty?
         ""
       else
-        flag << '='
-        flag << file_extensions.join(',')
+        flag << ' '
+        joined = file_extensions.join(",")
+          .prepend("*.{")
+          .concat("}\'")
+        if include
+          joined.prepend("\'")
+        else
+          joined.prepend("\'\!")
+        end
+        
+        flag << joined
       end
     end
 
     # returns nil if list is nil
     def flag_list(flag, list)
       list&.map do |value|
-        "#{flag}=#{value}"
+        "#{flag} \'\!#{value}\'"
       end
     end
 
@@ -178,8 +184,9 @@ module Salus::Scanners
     def filepath_pattern(filepaths)
       return "" if filepaths.nil?
 
-      filepaths.map! { |path| '^' + path + '$' }
-      filepaths.join('|')
+      joined = filepaths.join(",")
+      joined.prepend("-g \'\!{")
+      joined.concat("}\'")
     end
   end
 end
